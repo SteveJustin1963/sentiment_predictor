@@ -1,6 +1,6 @@
 # sentiment_predictor
 - it can talk with you and learn
-- try and send it to the tec-SPEECH module
+- try and send responses to the https://github.com/SteveJustin1963/tec-SPEECH/  the SPO256A-AL2
 
 ```
 import json
