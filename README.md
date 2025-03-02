@@ -300,5 +300,489 @@ else:
 ```
 
 
+# bridge to send to mint so it can speak on the SP0
+
+Let's set up a system that can transfer the answers from your Python sentiment analysis code to the MINT speech interface. This requires creating a bridge between the Python application and the TEC-1.
+
+Here's how we can do it:
+
+```python
+import serial
+import time
+import subprocess
+import re
+
+# Configuration
+SERIAL_PORT = '/dev/ttyUSB0'  # Change to match your setup (COM1, etc. on Windows)
+BAUD_RATE = 4800
+MAX_TEXT_LENGTH = 80  # Maximum characters to send at once to MINT
+
+def clean_text_for_speech(text):
+    """Clean and prepare text for the speech synthesizer"""
+    # Remove special characters that might confuse MINT
+    text = re.sub(r'[^a-zA-Z0-9 .,?!]', '', text)
+    # Limit length to prevent buffer overflow
+    if len(text) > MAX_TEXT_LENGTH:
+        text = text[:MAX_TEXT_LENGTH-3] + "..."
+    return text
+
+def send_to_mint(text):
+    """Send text to the MINT speech interface via serial port"""
+    try:
+        # Open serial connection
+        ser = serial.Serial(
+            port=SERIAL_PORT,
+            baudrate=BAUD_RATE,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=1
+        )
+        
+        print(f"Sending to MINT speech interface: '{text}'")
+        
+        # Send the text followed by Enter
+        ser.write(text.encode('ascii', errors='replace'))
+        ser.write(b'\r')
+        
+        # Wait for completion and read any response
+        time.sleep(2)  # Allow time for processing
+        response = ser.read(ser.in_waiting).decode('ascii', errors='replace')
+        if response:
+            print(f"Response from MINT: {response}")
+        
+        # Close the connection
+        ser.close()
+        return True
+        
+    except serial.SerialException as e:
+        print(f"Error communicating with MINT: {e}")
+        return False
+
+def run_sentiment_analysis():
+    """Run the sentiment analysis Python script and capture its output"""
+    try:
+        # Run the sentiment analysis script
+        process = subprocess.Popen(
+            ['python', 'sentiment_analysis.py'],  # Adjust the path as needed
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Interact with the script - send a test sentence
+        print("Sending test sentence to sentiment analysis...")
+        test_sentence = "Today was a really good day"
+        process.stdin.write(test_sentence + "\n")
+        process.stdin.flush()
+        
+        # Read output until we get a response
+        output = ""
+        while True:
+            line = process.stdout.readline()
+            output += line
+            print(line.strip())  # Display in console
+            
+            # Check if we got a response line
+            if "Response:" in line:
+                # Extract just the response part
+                response_text = line.split("Response:", 1)[1].strip()
+                
+                # Clean and send to MINT
+                clean_response = clean_text_for_speech(response_text)
+                send_to_mint(clean_response)
+                break
+                
+            # Avoid infinite loop if something goes wrong
+            if not line or "Prediction phase ended" in line:
+                break
+        
+        # Close process
+        process.terminate()
+        return output
+        
+    except Exception as e:
+        print(f"Error running sentiment analysis: {e}")
+        return None
+
+def interactive_mode():
+    """Interactive mode to send sentences to analysis and then to MINT"""
+    try:
+        # Start the sentiment analysis process
+        process = subprocess.Popen(
+            ['python', 'sentiment_analysis.py'],  # Adjust path as needed
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        print("Interactive mode started. Enter sentences for analysis (or 'exit' to quit).")
+        
+        # Skip initial output until prompt
+        while True:
+            line = process.stdout.readline()
+            print(line.strip())
+            if "Enter sentence for prediction" in line:
+                break
+        
+        # Main interaction loop
+        while True:
+            # Get user input
+            user_input = input("\nEnter sentence for analysis (or 'exit' to quit): ")
+            if user_input.lower() == 'exit':
+                break
+                
+            # Send to sentiment analysis
+            process.stdin.write(user_input + "\n")
+            process.stdin.flush()
+            
+            # Read output until we get a response
+            response_found = False
+            while not response_found:
+                line = process.stdout.readline()
+                print(line.strip())
+                
+                if "Response:" in line:
+                    # Extract just the response part
+                    response_text = line.split("Response:", 1)[1].strip()
+                    
+                    # Ask user if they want to send to MINT
+                    send_choice = input(f"Send this response to MINT? (y/n): ")
+                    if send_choice.lower() == 'y':
+                        # Clean and send to MINT
+                        clean_response = clean_text_for_speech(response_text)
+                        send_to_mint(clean_response)
+                        
+                    response_found = True
+                
+                # Handle feedback prompt
+                if "Is this prediction accurate?" in line:
+                    feedback = input("Enter feedback (y/n, or press Enter to skip): ")
+                    process.stdin.write(feedback + "\n")
+                    process.stdin.flush()
+                    
+                    # If feedback is 'n', handle the rating prompt
+                    if feedback.lower() == 'n':
+                        rating_line = process.stdout.readline()
+                        print(rating_line.strip())
+                        rating = input("Enter rating (1-10): ")
+                        process.stdin.write(rating + "\n")
+                        process.stdin.flush()
+                        
+                        # Read the updated response
+                        while True:
+                            line = process.stdout.readline()
+                            print(line.strip())
+                            if "Updated Response:" in line:
+                                response_text = line.split("Updated Response:", 1)[1].strip()
+                                
+                                # Ask user if they want to send to MINT
+                                send_choice = input(f"Send this updated response to MINT? (y/n): ")
+                                if send_choice.lower() == 'y':
+                                    clean_response = clean_text_for_speech(response_text)
+                                    send_to_mint(clean_response)
+                                break
+                
+                # Avoid infinite loop
+                if not line or "Prediction phase ended" in line:
+                    break
+        
+        # Close process
+        print("Exiting interactive mode.")
+        process.terminate()
+        
+    except Exception as e:
+        print(f"Error in interactive mode: {e}")
+
+if __name__ == "__main__":
+    print("Python to MINT Speech Interface Bridge")
+    print("-------------------------------------")
+    print("1. Run sentiment analysis with test sentence")
+    print("2. Enter interactive mode")
+    print("3. Send custom text to MINT")
+    print("4. Exit")
+    
+    choice = input("Select an option (1-4): ")
+    
+    if choice == '1':
+        run_sentiment_analysis()
+    elif choice == '2':
+        interactive_mode()
+    elif choice == '3':
+        text = input("Enter text to send to MINT: ")
+        clean_text = clean_text_for_speech(text)
+        send_to_mint(clean_text)
+    else:
+        print("Exiting.")
+
+```
+
+## How to Connect Python with MINT Speech Interface
+
+This solution creates a bridge between your Python sentiment analysis program and the MINT speech interface on the TEC-1. Here's how it works:
+
+### Setup Requirements:
+
+1. **Hardware Connection**:
+   - Connect your computer to the TEC-1 using a serial adapter (USB to Serial)
+   - Make sure the TEC-1 is running the MINT speech interface program
+
+2. **Software Dependencies**:
+   - Install the PySerial library: `pip install pyserial`
+   - Save your sentiment analysis code as `sentiment_analysis.py`
+   - Save the bridge code as `mint_bridge.py`
+
+### How the Bridge Works:
+
+1. **Serial Communication**:
+   - The bridge opens a serial connection to the TEC-1 at 4800 baud
+   - It sends text responses from the sentiment analysis to MINT
+   - The MINT program will then speak the text through the SP0256-AL2
+
+2. **Operating Modes**:
+   - **Test mode**: Runs a single test sentence through the analysis
+   - **Interactive mode**: Continuous input/output with the sentiment analysis
+   - **Custom text**: Send arbitrary text directly to MINT
+
+3. **Text Processing**:
+   - Cleans text to make it compatible with MINT
+   - Limits length to prevent buffer overflow
+   - Removes special characters that might confuse the speech synthesizer
+
+### Usage Instructions:
+
+1. Make sure your TEC-1 is powered on and running the MINT speech interface
+2. Run the bridge program: `python mint_bridge.py`
+3. Choose the operating mode:
+   - Option 1 runs a test with "Today was a really good day"
+   - Option 2 enters interactive mode for ongoing analysis
+   - Option 3 lets you send custom text without sentiment analysis
+
+4. In interactive mode:
+   - Type sentences for sentiment analysis
+   - Confirm whether to send the response to MINT
+   - Provide feedback on prediction accuracy if asked
+
+### Customization Options:
+
+- Change the `SERIAL_PORT` variable to match your setup
+- Adjust `MAX_TEXT_LENGTH` based on your MINT program's buffer size
+- Modify the text cleaning function to match your speech synthesis needs
+
+With this setup, you can now use your sentiment analysis model to generate responses and have the TEC-1 speak them through the SP0256-AL2 chip!
+
+```
+import serial
+import time
+import subprocess
+import re
+
+# Configuration
+SERIAL_PORT = '/dev/ttyUSB0'  # Change to match your setup (COM1, etc. on Windows)
+BAUD_RATE = 4800
+MAX_TEXT_LENGTH = 80  # Maximum characters to send at once to MINT
+
+def clean_text_for_speech(text):
+    """Clean and prepare text for the speech synthesizer"""
+    # Remove special characters that might confuse MINT
+    text = re.sub(r'[^a-zA-Z0-9 .,?!]', '', text)
+    # Limit length to prevent buffer overflow
+    if len(text) > MAX_TEXT_LENGTH:
+        text = text[:MAX_TEXT_LENGTH-3] + "..."
+    return text
+
+def send_to_mint(text):
+    """Send text to the MINT speech interface via serial port"""
+    try:
+        # Open serial connection
+        ser = serial.Serial(
+            port=SERIAL_PORT,
+            baudrate=BAUD_RATE,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=1
+        )
+        
+        print(f"Sending to MINT speech interface: '{text}'")
+        
+        # Send the text followed by Enter
+        ser.write(text.encode('ascii', errors='replace'))
+        ser.write(b'\r')
+        
+        # Wait for completion and read any response
+        time.sleep(2)  # Allow time for processing
+        response = ser.read(ser.in_waiting).decode('ascii', errors='replace')
+        if response:
+            print(f"Response from MINT: {response}")
+        
+        # Close the connection
+        ser.close()
+        return True
+        
+    except serial.SerialException as e:
+        print(f"Error communicating with MINT: {e}")
+        return False
+
+def run_sentiment_analysis():
+    """Run the sentiment analysis Python script and capture its output"""
+    try:
+        # Run the sentiment analysis script
+        process = subprocess.Popen(
+            ['python', 'sentiment_analysis.py'],  # Adjust the path as needed
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Interact with the script - send a test sentence
+        print("Sending test sentence to sentiment analysis...")
+        test_sentence = "Today was a really good day"
+        process.stdin.write(test_sentence + "\n")
+        process.stdin.flush()
+        
+        # Read output until we get a response
+        output = ""
+        while True:
+            line = process.stdout.readline()
+            output += line
+            print(line.strip())  # Display in console
+            
+            # Check if we got a response line
+            if "Response:" in line:
+                # Extract just the response part
+                response_text = line.split("Response:", 1)[1].strip()
+                
+                # Clean and send to MINT
+                clean_response = clean_text_for_speech(response_text)
+                send_to_mint(clean_response)
+                break
+                
+            # Avoid infinite loop if something goes wrong
+            if not line or "Prediction phase ended" in line:
+                break
+        
+        # Close process
+        process.terminate()
+        return output
+        
+    except Exception as e:
+        print(f"Error running sentiment analysis: {e}")
+        return None
+
+def interactive_mode():
+    """Interactive mode to send sentences to analysis and then to MINT"""
+    try:
+        # Start the sentiment analysis process
+        process = subprocess.Popen(
+            ['python', 'sentiment_analysis.py'],  # Adjust path as needed
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        print("Interactive mode started. Enter sentences for analysis (or 'exit' to quit).")
+        
+        # Skip initial output until prompt
+        while True:
+            line = process.stdout.readline()
+            print(line.strip())
+            if "Enter sentence for prediction" in line:
+                break
+        
+        # Main interaction loop
+        while True:
+            # Get user input
+            user_input = input("\nEnter sentence for analysis (or 'exit' to quit): ")
+            if user_input.lower() == 'exit':
+                break
+                
+            # Send to sentiment analysis
+            process.stdin.write(user_input + "\n")
+            process.stdin.flush()
+            
+            # Read output until we get a response
+            response_found = False
+            while not response_found:
+                line = process.stdout.readline()
+                print(line.strip())
+                
+                if "Response:" in line:
+                    # Extract just the response part
+                    response_text = line.split("Response:", 1)[1].strip()
+                    
+                    # Ask user if they want to send to MINT
+                    send_choice = input(f"Send this response to MINT? (y/n): ")
+                    if send_choice.lower() == 'y':
+                        # Clean and send to MINT
+                        clean_response = clean_text_for_speech(response_text)
+                        send_to_mint(clean_response)
+                        
+                    response_found = True
+                
+                # Handle feedback prompt
+                if "Is this prediction accurate?" in line:
+                    feedback = input("Enter feedback (y/n, or press Enter to skip): ")
+                    process.stdin.write(feedback + "\n")
+                    process.stdin.flush()
+                    
+                    # If feedback is 'n', handle the rating prompt
+                    if feedback.lower() == 'n':
+                        rating_line = process.stdout.readline()
+                        print(rating_line.strip())
+                        rating = input("Enter rating (1-10): ")
+                        process.stdin.write(rating + "\n")
+                        process.stdin.flush()
+                        
+                        # Read the updated response
+                        while True:
+                            line = process.stdout.readline()
+                            print(line.strip())
+                            if "Updated Response:" in line:
+                                response_text = line.split("Updated Response:", 1)[1].strip()
+                                
+                                # Ask user if they want to send to MINT
+                                send_choice = input(f"Send this updated response to MINT? (y/n): ")
+                                if send_choice.lower() == 'y':
+                                    clean_response = clean_text_for_speech(response_text)
+                                    send_to_mint(clean_response)
+                                break
+                
+                # Avoid infinite loop
+                if not line or "Prediction phase ended" in line:
+                    break
+        
+        # Close process
+        print("Exiting interactive mode.")
+        process.terminate()
+        
+    except Exception as e:
+        print(f"Error in interactive mode: {e}")
+
+if __name__ == "__main__":
+    print("Python to MINT Speech Interface Bridge")
+    print("-------------------------------------")
+    print("1. Run sentiment analysis with test sentence")
+    print("2. Enter interactive mode")
+    print("3. Send custom text to MINT")
+    print("4. Exit")
+    
+    choice = input("Select an option (1-4): ")
+    
+    if choice == '1':
+        run_sentiment_analysis()
+    elif choice == '2':
+        interactive_mode()
+    elif choice == '3':
+        text = input("Enter text to send to MINT: ")
+        clean_text = clean_text_for_speech(text)
+        send_to_mint(clean_text)
+    else:
+        print("Exiting.")
+```
 
 
