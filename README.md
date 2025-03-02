@@ -1,6 +1,6 @@
 # sentiment_predictor
-it can talk with you and learn
-
+- it can talk with you and learn
+- try and send it to the tec-SPEECH module
 
 ```
 import json
